@@ -70,7 +70,6 @@ scripts/train/uni_rwkvts_pretrain_howard.sh
 scripts/train/*.out
 scripts/train/nohup*
 scripts/generate/*.npy
-requirements_current.txt
 DATA_CACHE_*.md
 MULTI_GPU_*.md
 
