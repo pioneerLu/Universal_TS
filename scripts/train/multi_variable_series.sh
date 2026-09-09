@@ -1,22 +1,20 @@
-export WANDB_MODE=offline
-export CUDA_LAUNCH_BLOCKING=1
-export CUDA_VISIBLE_DEVICES=2 
+#!/usr/bin/env bash
+set -euo pipefail
+source "$(dirname "$0")/../_common.sh"
 
-# 切换到脚本所在目录的上两级目录
-cd "$(dirname "$(dirname "$0")")/../.."
+export WANDB_MODE="${WANDB_MODE:-offline}"
+DATA_FILE="${DATA_FILE:-$ROOT/data/benchmark/test.csv}"
+CKPT="${CKPT:-}"
+PROJ_DIR="${PROJ_DIR:-out/test_multi}"
 
-# 打印当前工作目录
-echo "Current working directory: $(pwd)"
-
-
-python train.py --load_model "/home/rwkv/RWKV-TS/Universal-RWKV-TS-main/out/multi_from_uni/multi_from_uni.pth" \
-    --wandb "rwkvts_test" --proj_dir out/test_multi_from_uni \
-    --data_file /home/rwkv/RWKV-TS/Universal-RWKV-TS-main/test_dataset/test.csv \
-    --data_type "json" --vocab_size 65536 \
+python train.py \
+    --load_model "$CKPT" \
+    --wandb "${WANDB_PROJECT:-rwkvts}" \
+    --proj_dir "$PROJ_DIR" \
+    --data_file "$DATA_FILE" \
     --ctx_len 100 --epoch_steps 200 --epoch_count 5 --epoch_begin 0 --epoch_save 1 \
     --micro_bsz 128 --accumulate_grad_batches 1 --n_layer 6 --n_embd 512 --pre_ffn 0 \
     --lr_init 1e-4 --lr_final 5e-5 --warmup_steps 0 --beta1 0.9 --beta2 0.99 --adam_eps 1e-8 \
     --accelerator gpu --devices 1 --precision bf16 --strategy deepspeed_stage_1 --grad_cp 1 \
-    --enable_progress_bar True --sma_window 3 --validate_only 1 --dataset_type multi --num_vars 10 \
-    --select_indices '0,1,2,3,4,5,6,7,8,9' --feature_used '0,1,2,3,4,5,6,7,8,9'
-
+    --enable_progress_bar True --sma_window 3 --validate_only "${VALIDATE_ONLY:-0}" --dataset_type multi \
+    --select_indices 0,1,2,3,4,5,6,7,8,9 --feature_used 0,1,2,3,4,5,6,7,8,9 --do_normalize True

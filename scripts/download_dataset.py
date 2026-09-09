@@ -10,9 +10,11 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', type=str, help='dataset name', default= "thuml/UTSD")
 parser.add_argument('--subset', type=str, help='subset name', default= "UTSD-1G")
-parser.add_argument('--output', type=str, help='output directory')
+parser.add_argument('--output', type=str, help='output directory', default='data/pretrain/utsd')
 
 args = parser.parse_args()
+if not args.output:
+    raise SystemExit('--output is required')
 
 ds = datasets.load_dataset(args.dataset, args.subset)
 

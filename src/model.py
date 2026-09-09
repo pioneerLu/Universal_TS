@@ -19,6 +19,11 @@ if importlib.util.find_spec('deepspeed'):
 import pandas as pd
 from .utils import compress_parameter_names
 import matplotlib.pyplot as plt
+
+os.environ.setdefault("RWKV_JIT_ON", "0")
+os.environ.setdefault("RWKV_HEAD_SIZE_A", "64")
+os.environ.setdefault("Mode", "cuda")
+
 def __nop(ob):
     return ob
 
@@ -37,39 +42,41 @@ CHUNK_LEN = 16
 MODE = os.environ.get("Mode", "cuda")
 from torch.utils.cpp_extension import load
 
-# 尝试加载 CUDA 扩展（仅在非 CPU 模式下）
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_CUDA_DIR = os.path.join(_PROJECT_ROOT, "cuda")
+
 CUDA_EXT_AVAILABLE = False
 CPU_EXT_AVAILABLE = False
 
 if MODE != 'inference_cpu':
     try:
         flags = ['-res-usage', f'-D_C_={HEAD_SIZE}', f"-D_CHUNK_LEN_={CHUNK_LEN}", "--use_fast_math", "-O3", "-Xptxas -O3", "--extra-device-vectorization"]
-        load(name="wind_backstepping", sources=[f'cuda/wkv7_cuda.cu', 'cuda/wkv7_op.cpp'], is_python_module=False, verbose=True, extra_cuda_cflags=flags)
+        load(
+            name="wind_backstepping",
+            sources=[os.path.join(_CUDA_DIR, "wkv7_cuda.cu"), os.path.join(_CUDA_DIR, "wkv7_op.cpp")],
+            is_python_module=False,
+            verbose=True,
+            extra_cuda_cflags=flags,
+        )
         CUDA_EXT_AVAILABLE = True
     except Exception as e:
         print(f"Warning: Failed to load CUDA extension, will use CPU fallback: {e}")
         CUDA_EXT_AVAILABLE = False
 
-# 尝试加载 CPU C++ 扩展
 try:
-    import os
-    # Get the cuda directory path
-    current_file = os.path.abspath(__file__)
-    src_dir = os.path.dirname(current_file)
-    project_root = os.path.dirname(src_dir)
-    cuda_dir = os.path.join(project_root, 'cuda')
-    
     cpu_sources = [
-        os.path.join(cuda_dir, 'wkv7_cpu.cpp'),
-        os.path.join(cuda_dir, 'wkv7_cpu_op.cpp')
+        os.path.join(_CUDA_DIR, "wkv7_cpu.cpp"),
+        os.path.join(_CUDA_DIR, "wkv7_cpu_op.cpp"),
     ]
     
-    # Check if files exist
     if all(os.path.exists(f) for f in cpu_sources):
+        extra_cflags = ['-O3', '-march=native', '-mtune=native', '-fopenmp', 
+                        '-mavx2', '-mfma', '-ffast-math', '-funroll-loops']
+        extra_ldflags = ['-fopenmp']
         load(name="wind_backstepping_cpu", sources=cpu_sources, is_python_module=False, verbose=True, 
-             extra_cflags=['-O3', '-march=native', '-mtune=native', '-fopenmp'])
+             extra_cflags=extra_cflags, extra_ldflags=extra_ldflags)
         CPU_EXT_AVAILABLE = True
-        print("Successfully loaded CPU C++ extension")
+        print("Successfully loaded CPU C++ extension with SIMD and OpenMP optimizations")
     else:
         missing = [f for f in cpu_sources if not os.path.exists(f)]
         print(f"Warning: CPU C++ source files not found: {missing}, will use Python fallback")
@@ -84,10 +91,7 @@ except Exception as e:
 def _wkv7_cpu_core(w_reshaped: torch.Tensor, q_reshaped: torch.Tensor, k_reshaped: torch.Tensor, 
                    v_reshaped: torch.Tensor, a_reshaped: torch.Tensor, b_reshaped: torch.Tensor,
                    C: int, T: int, CHUNK_LEN: int, device: torch.device) -> tuple:
-    """
-    JIT-compiled core computation for WKV7 CPU forward pass.
-    This function is optimized for speed using JIT compilation.
-    """
+    """WKV7 CPU forward core."""
     B_H = w_reshaped.shape[0]
     y_out = torch.zeros(B_H, T, C, dtype=torch.float32, device=device)
     sa_out = torch.zeros(B_H, T, C, dtype=torch.float32, device=device)
@@ -121,14 +125,7 @@ def _wkv7_cpu_core(w_reshaped: torch.Tensor, q_reshaped: torch.Tensor, k_reshape
     return y_out, sa_out, s_out
 
 def wkv7_cpu_forward(w, q, k, v, z, b):
-    """
-    CPU fallback implementation of WKV7 forward pass (highly optimized).
-    w, q, k, v, z, b: [B, T, H, C] tensors
-    Returns: y [B, T, H, C], s [B, H, T//CHUNK_LEN, C, C], sa [B, T, H, C]
-    
-    Optimized to match CUDA kernel structure with minimal Python loops.
-    Uses batch operations where possible.
-    """
+    """CPU WKV7 forward. Inputs [B, T, H, C]; returns y, s, sa."""
     B, T, H, C = w.shape
     device = w.device
     
@@ -341,7 +338,7 @@ class RWKV_Tmix_x070(nn.Module):
         C = args.n_embd
 
         with torch.no_grad():
-            ratio_0_to_1 = layer_id / (args.n_layer - 1)  # 0 to 1
+            ratio_0_to_1 = 0.0 if args.n_layer <= 1 else layer_id / (args.n_layer - 1)
             ratio_1_to_almost0 = 1.0 - (layer_id / args.n_layer)  # 1 to ~0
             ddd = torch.ones(1, 1, C)
             for i in range(C):
@@ -694,6 +691,9 @@ class UniversalRWKVTimeSeries(pl.LightningModule):
                 optim_groups += [{"params": weight_decay_group, "weight_decay": 0.0}]
         if self.deepspeed_offload:
             return DeepSpeedCPUAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adamw_mode=True, amsgrad=False)
+        use_cpu = str(getattr(self.args, "device", "cuda")) == "cpu" or not torch.cuda.is_available()
+        if use_cpu:
+            return torch.optim.AdamW(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps)
         return FusedAdam(optim_groups, lr=self.args.lr_init, betas=self.args.betas, eps=self.args.adam_eps, bias_correction=True, adam_w_mode=True, amsgrad=False)
 
     @property
@@ -830,8 +830,10 @@ class UniversalRWKVTimeSeries(pl.LightningModule):
         batch: dict with keys "input_ids", "labels" and "input_text"
         '''
         seq_x = batch["seq_x"]
-        if self.args.precision == "bf16":
-            seq_x = seq_x.bfloat16() 
+        if str(self.args.precision) == "bf16" and seq_x.device.type == "cuda":
+            seq_x = seq_x.bfloat16()
+        else:
+            seq_x = seq_x.float()
         predicts = self(seq_x)
         targets = seq_x
         shift_predicts = predicts[..., :-self.pre_len, :].contiguous()
@@ -851,8 +853,10 @@ class UniversalRWKVTimeSeries(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         seq_x = batch["seq_x"]
-        if self.args.precision == "bf16":
+        if str(self.args.precision) == "bf16" and seq_x.device.type == "cuda":
             seq_x = seq_x.bfloat16()
+        else:
+            seq_x = seq_x.float()
         predicts = self(seq_x)
         targets = seq_x
         

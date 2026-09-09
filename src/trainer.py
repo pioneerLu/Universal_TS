@@ -19,7 +19,7 @@ class train_callback(pl.Callback):
     def on_train_batch_start(self, trainer, pl_module, batch, batch_idx):
         args = self.args
         # global_step is update step, influence by gradient accumulation
-        real_step = trainer.global_step * args.accumulate_grad_batches + args.epoch_begin * args.epoch_steps
+        real_step = trainer.global_step * (args.accumulate_grad_batches or 1) + args.epoch_begin * args.epoch_steps
 
         # LR schedule, cosine with warmup
         w_step = args.warmup_steps
@@ -160,7 +160,7 @@ class train_callback(pl.Callback):
                     
                     pure_state_dict_path = save_path
 
-                    full_checkpoint = torch.load(save_path, map_location="cpu")
+                    full_checkpoint = torch.load(save_path, map_location="cpu", weights_only=False)
   
                     state_dict = full_checkpoint['state_dict']
                 
@@ -178,9 +178,8 @@ class train_callback(pl.Callback):
 
 
         if trainer.is_global_zero:
-            import numpy as np
             if hasattr(trainer, 'my_epoch_loss'):
-                trainer.my_log.write(f"{args.epoch_begin + trainer.current_epoch} {trainer.my_epoch_loss:.6f} {np.exp(trainer.my_epoch_loss, dtype=np.float32):.4f} {trainer.my_lr:.8f} {datetime.datetime.now()} {trainer.current_epoch}\n")
+                trainer.my_log.write(f"{args.epoch_begin + trainer.current_epoch} {trainer.my_epoch_loss:.6f} {trainer.my_lr:.8f} {datetime.datetime.now()} {trainer.current_epoch}\n")
                 trainer.my_log.flush()
 
                 trainer.my_loss_sum = 0

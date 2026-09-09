@@ -375,16 +375,18 @@ class UniversalRWKVTimeSeries(pl.LightningModule):
         df.to_csv(truncate_path, index=False)
         
     def _save_best_model(self, val_loss):
-        old_model = os.path.join('/home/rwkv/RWKV-TS/Universal-RWKV-TS-main/output_dir/timer_norm', f"best-{self.best_val_loss:.3f}.pth")
+        ckpt_dir = os.path.join(self.args.proj_dir, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        old_model = os.path.join(ckpt_dir, f"best-{self.best_val_loss:.3f}.pth")
         if os.path.exists(old_model):
             os.remove(old_model)
-        
-        new_model = os.path.join('/home/rwkv/RWKV-TS/Universal-RWKV-TS-main/output_dir/timer_norm', f"best-{val_loss:.3f}.pth")
+
+        new_model = os.path.join(ckpt_dir, f"best-{val_loss:.3f}.pth")
         torch.save(self.state_dict(), new_model)
         self.best_val_loss = val_loss
 
     def _plot_predictions(self, outputs, val_loss):
-        plot_dir = os.path.join('/home/rwkv/RWKV-TS/Universal-RWKV-TS-main/output_dir/timer_norm', f"best_plots_{val_loss:.3f}")
+        plot_dir = os.path.join(self.args.proj_dir, "visualization", f"best_plots_{val_loss:.3f}")
         os.makedirs(plot_dir, exist_ok=True)
         
         time_scales = [

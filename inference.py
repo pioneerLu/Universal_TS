@@ -2,22 +2,8 @@
 import matplotlib.pyplot as plt
 import logging
 logging.basicConfig(level=logging.INFO)
-def parse_indices(value):
 
-    if isinstance(value, int):
-        return [value]
-    
-    if isinstance(value, str):
-        try:
-            # "[1,2,3]" / "1,2,3"
-            return [int(x.strip()) for x in value.strip('[]').split(',')]
-        except ValueError:
-            # 默认1
-            return [1]
-    try:
-        return [int(x) for x in value]
-    except (ValueError, TypeError):
-        return [1]
+from src.cli import parse_indices, apply_feature_args, configure_runtime, load_timeseries_array
     
 if __name__ == "__main__":
     from argparse import ArgumentParser
@@ -83,11 +69,7 @@ if __name__ == "__main__":
     parser = Trainer.add_argparse_args(parser)
     args = parser.parse_args()
 
-    
-
-    assert set(args.select_indices).issubset(set(args.feature_used)),'select_indices should be a subset of feature_used'
-    args.num_vars = len(args.feature_used)
-    args.select_indices_positions = [args.feature_used.index(idx) for idx in args.select_indices]
+    apply_feature_args(args)
 
     ########################################################################################################
 
@@ -95,7 +77,7 @@ if __name__ == "__main__":
     import numpy as np
     import torch
     from torch.utils.data import DataLoader
-    if "deepspeed" in args.strategy:
+    if args.strategy and "deepspeed" in str(args.strategy):
         import deepspeed
     from pytorch_lightning import seed_everything
 
@@ -108,141 +90,22 @@ if __name__ == "__main__":
     warnings.filterwarnings("ignore", ".*The progress bar already tracks a metric with the*")
     # os.environ["WDS_SHOW_SEED"] = "1"
 
-    args.my_timestamp = datetime.datetime.today().strftime("%Y-%m-%d-%H-%M-%S")
-    args.enable_checkpointing = False
-    args.replace_sampler_ddp = False
-    args.logger = False
-    args.gradient_clip_val = 1.0
-    args.num_sanity_val_steps = 0
-    args.check_val_every_n_epoch = int(1e20)
-    args.log_every_n_steps = int(1e20)
-    args.max_epochs = args.epoch_count  # continue forever
-    args.betas = (args.beta1, args.beta2)
-    args.real_bsz = int(args.num_nodes) * int(args.devices) * args.micro_bsz
-    os.environ["RWKV_CTXLEN"] = str(args.ctx_len)
-    os.environ["RWKV_HEAD_SIZE_A"] = str(args.head_size_a)
-    # 根据设备设置 MODE
-    if args.device == 'cpu':
-        os.environ["Mode"] = 'inference_cpu'
-    else:
-        os.environ["Mode"] = 'cuda'
-    if args.dim_att <= 0:
-        args.dim_att = args.n_embd
-    if args.dim_ffn <= 0:
-        args.dim_ffn = int((args.n_embd * 3.5) // 32 * 32) # default = 3.5x emb size
+    configure_runtime(args, mode="infer")
+    rank_zero_info(f"Inference: data={args.data_file} proj={args.proj_dir} device={args.device} ctx={args.ctx_len}")
 
-    #args.run_name = f"{args.vocab_size} ctx{args.ctx_len} L{args.n_layer} D{args.n_embd}"
-    if not os.path.exists(args.proj_dir):
-        os.makedirs(args.proj_dir)
-
-    samples_per_epoch = args.epoch_steps * args.real_bsz
-    tokens_per_epoch = samples_per_epoch * args.ctx_len
-    try:
-        deepspeed_version = deepspeed.__version__
-    except:
-        deepspeed_version = None
-        pass
-    rank_zero_info(
-        f"""
-############################################################################
-#
-# RWKV-7 {args.precision.upper()} on {args.num_nodes}x{args.devices} {args.accelerator.upper()}, bsz {args.num_nodes}x{args.devices}x{args.micro_bsz}={args.real_bsz}, {args.strategy} {'with grad_cp' if args.grad_cp > 0 else ''}
-#
-# Data = {args.data_file} ({args.data_type}), ProjDir = {args.proj_dir}
-#
-# Epoch = {args.epoch_begin} to {args.epoch_begin + args.epoch_count - 1} (will continue afterwards), save every {args.epoch_save} epoch
-#
-# Each "epoch" = {args.epoch_steps} steps, {samples_per_epoch} samples, {tokens_per_epoch} tokens
-#
-# Model = {args.n_layer} n_layer, {args.n_embd} n_embd, {args.ctx_len} ctx_len
-#
-# Adam = lr {args.lr_init} to {args.lr_final}, warmup {args.warmup_steps} steps, beta {args.betas}, eps {args.adam_eps}
-#
-# Found torch {torch.__version__}, recommend 1.13.1+cu117 or newer
-# Found deepspeed {deepspeed_version}, recommend 0.7.0 (faster than newer versions)
-# Found pytorch_lightning {pl.__version__}, recommend 1.9.5
-#
-############################################################################
-"""
-    )
-    rank_zero_info(str(vars(args)) + "\n")
-
-    assert args.data_type in ["json"]
-
-    assert args.precision in ["fp32", "tf32", "fp16", "bf16"]
-    os.environ["RWKV_FLOAT_MODE"] = args.precision
-    if args.precision == "fp32":
-        for i in range(10):
-            rank_zero_info("\n\nNote: you are using fp32 (very slow). Try bf16 / tf32 for faster training.\n\n")
-    if args.precision == "fp16":
-        rank_zero_info("\n\nNote: you are using fp16 (might overflow). Try bf16 / tf32 for stable training.\n\n")
-
-    os.environ["RWKV_JIT_ON"] = "1"
-    if "deepspeed_stage_3" in args.strategy:
-        os.environ["RWKV_JIT_ON"] = "0"
-
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.enabled = True
-    if args.precision == "fp32":
-        torch.backends.cudnn.allow_tf32 = False
-        torch.backends.cuda.matmul.allow_tf32 = False
-    else:
-        torch.backends.cudnn.allow_tf32 = True
-        torch.backends.cuda.matmul.allow_tf32 = True
-
-    if "32" in args.precision:
-        args.precision = 32
-    elif args.precision == "fp16":
-        args.precision = 16
-    else:
-        args.precision = "bf16"
-
-    ########################################################################################################
-    from src.trainer import train_callback
-    # import pdb
-    # pdb.set_trace()
     from src.model import UniversalRWKVTimeSeries
+    from src.checkpoint import load_weights
 
-    if args.load_model:
-        ckpt_path = os.path.join(args.proj_dir, args.load_model)
-        # model = UniversalRWKVTimeSeries.load_from_checkpoint(torch.load(ckpt_path, map_location="cpu"))
-        from io import BytesIO
-
-        with open(args.load_model, 'rb') as f:
-            buffer = BytesIO(f.read())
-        model = UniversalRWKVTimeSeries(args)
-        checkpoint = torch.load(buffer, map_location='cpu')
-        
-        if 'pytorch-lightning_version' in checkpoint:
-            model.load_state_dict(checkpoint['state_dict'])
-        else:  # if old version of pytorch-lightning
-            new_state_dict = {}
-            for k, v in checkpoint.items():
-                if k.startswith('module.'):
-                    k = k[7:]  # remove prefix 'encoder.' or 'decoder.' for DDP/DDP
-                if k.startswith('_forward_module.'):
-                    k = k[16:]
-                new_state_dict[k] = v
-            # import pdb; pdb.set_trace()
-            
-            filtered_dict = {k: v for k, v in new_state_dict.items() if "smooth.conv.weight" not in k}
-
-            model.load_state_dict(filtered_dict,strict=False)
-
-        model.eval()
-        # Use bfloat16 on CUDA, float32 on CPU (CPU may not support bfloat16)
-        if args.device == 'cuda' and torch.cuda.is_available():
-            model = model.to(dtype=torch.bfloat16)
-        else:
-            # CPU inference - use float32
-            model = model.to(dtype=torch.float32)
-        
-
-        rank_zero_info(f"Loaded pretrained RWKV from {ckpt_path}")
-
-    else:
+    if not args.load_model:
         raise ValueError("Please provide a checkpoint path with --load_model")
-    
+    model = UniversalRWKVTimeSeries(args)
+    load_weights(model, args.load_model, strict=False)
+    model.eval()
+    if args.device == "cuda" and torch.cuda.is_available():
+        model = model.to(dtype=torch.bfloat16)
+    else:
+        model = model.to(dtype=torch.float32)
+ 
 
 
     def autoregressive_predict(model, initial_sequence, horizon, window_size, device, feature_count):
@@ -434,22 +297,9 @@ if __name__ == "__main__":
         print(f"Saved predictions to {np_save_path} and {csv_path}")
 
     def load_data(args):
-        try:
-            # Load all columns from the original data file
-            data = np.load(args.data_file)
-            if data.ndim == 1:
-                data = data.reshape(-1, 1)
-            elif data.ndim == 2:
-                pass  # Already 2D
-            else:
-                raise ValueError(f"Unsupported data shape: {data.shape}")
-            print(f"Loaded numpy data with shape {data.shape}")
-            return data
-        except:
-            import pandas as pd
-            data = pd.read_csv(args.data_file).values
-            print(f"Loaded CSV data with shape {data.shape}")
-            return data
+        data = load_timeseries_array(args.data_file)
+        print(f"Loaded data with shape {data.shape}")
+        return data
     
     def normalize(data,args):
         """
